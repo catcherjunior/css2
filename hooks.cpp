@@ -1,4 +1,4 @@
-// hooks.cpp — D3D9 EndScene/Reset + WndProc + CreateMove VMT hooks
+// hooks.cpp — D3D9 EndScene/Reset + CreateMove VMT hooks
 #include "hooks.h"
 #include "config.h"
 #include "features.h"
@@ -6,9 +6,6 @@
 #include <imgui.h>
 #include <imgui_impl_dx9.h>
 #include <imgui_impl_win32.h>
-
-extern IMGUI_IMPL_API LRESULT
-ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
 
 static void* VtSwap(void** vt, int idx, void* fn) {
     DWORD old;
@@ -34,34 +31,34 @@ static HRESULT __stdcall hEndScene(IDirect3DDevice9* dev) {
         ImGuiStyle& s = ImGui::GetStyle();
         s.WindowRounding = s.FrameRounding = s.GrabRounding = s.TabRounding = 5.f;
         s.WindowBorderSize = 1.f;
-        s.Colors[ImGuiCol_WindowBg]       = {0.08f, 0.08f, 0.09f, 0.94f};
-        s.Colors[ImGuiCol_TitleBgActive]  = {0.15f, 0.15f, 0.17f, 1.00f};
-        s.Colors[ImGuiCol_Header]         = {0.20f, 0.20f, 0.22f, 1.00f};
-        s.Colors[ImGuiCol_SliderGrab]     = {0.40f, 0.60f, 1.00f, 1.00f};
-        s.Colors[ImGuiCol_CheckMark]      = {0.40f, 0.80f, 0.40f, 1.00f};
+        s.Colors[ImGuiCol_WindowBg]      = {0.08f, 0.08f, 0.09f, 0.94f};
+        s.Colors[ImGuiCol_TitleBgActive] = {0.15f, 0.15f, 0.17f, 1.00f};
+        s.Colors[ImGuiCol_Header]        = {0.20f, 0.20f, 0.22f, 1.00f};
+        s.Colors[ImGuiCol_SliderGrab]    = {0.40f, 0.60f, 1.00f, 1.00f};
+        s.Colors[ImGuiCol_CheckMark]     = {0.40f, 0.80f, 0.40f, 1.00f};
 
         ImGuiIO& io = ImGui::GetIO();
-        io.ConfigFlags  |= ImGuiConfigFlags_NavEnableKeyboard;
-        io.IniFilename   = nullptr;
+        io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+        io.IniFilename  = nullptr;
 
         ImGui_ImplWin32_Init(Hooks::g_Hwnd);
         ImGui_ImplDX9_Init(dev);
-
-        Hooks::oWndProc = (Hooks::WndProc_t)SetWindowLongPtrA(
-            Hooks::g_Hwnd, GWLP_WNDPROC, (LONG_PTR)hWndProc);
-
         Hooks::g_ImgInit = true;
+    }
+
+    // poll INSERT directly, no WndProc needed
+    if (GetAsyncKeyState(VK_INSERT) & 1) {
+        g_cfg.menu_open = !g_cfg.menu_open;
+        ShowCursor(g_cfg.menu_open);
+        if (g_cfg.menu_open) ClipCursor(nullptr);
     }
 
     ImGui_ImplDX9_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
 
-    if (g_cfg.esp_enabled && iface::engine && iface::engine->IsInGame())
-        Features::DrawESP();
-
-    if (g_cfg.menu_open)
-        Menu::Draw();
+    // always draw menu so we can confirm rendering works
+    Menu::Draw();
 
     ImGui::Render();
     ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());
@@ -73,19 +70,6 @@ static HRESULT __stdcall hReset(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS* pp
     HRESULT hr = Hooks::oReset(dev, pp);
     if (Hooks::g_ImgInit && SUCCEEDED(hr)) ImGui_ImplDX9_CreateDeviceObjects();
     return hr;
-}
-
-static LRESULT CALLBACK hWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    if (msg == WM_KEYDOWN && wParam == VK_INSERT) {
-        g_cfg.menu_open = !g_cfg.menu_open;
-        ShowCursor(g_cfg.menu_open);
-        if (g_cfg.menu_open) ClipCursor(nullptr);
-    }
-    if (g_cfg.menu_open) {
-        ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam);
-        if (ImGui::GetIO().WantCaptureMouse) return 0;
-    }
-    return CallWindowProcA(Hooks::oWndProc, hWnd, msg, wParam, lParam);
 }
 
 static bool __fastcall hCreateMove(void* ecx, void*, float dt, CUserCmd* cmd) {
@@ -123,7 +107,6 @@ bool Hooks::InitD3D9() {
     oReset      = (Reset_t)  VtSwap(g_D3DVtable, 16, (void*)hReset);
     dev->Release();
     DestroyWindow(tmp);
-
     return true;
 }
 
@@ -136,13 +119,11 @@ bool Hooks::InitCreateMove() {
 
 void Hooks::Shutdown() {
     if (g_D3DVtable) {
-        if (oEndScene)  VtSwap(g_D3DVtable, 42, (void*)oEndScene);
-        if (oReset)     VtSwap(g_D3DVtable, 16, (void*)oReset);
+        if (oEndScene) VtSwap(g_D3DVtable, 42, (void*)oEndScene);
+        if (oReset)    VtSwap(g_D3DVtable, 16, (void*)oReset);
     }
     if (oCreateMove && iface::client_mode)
         VtSwap(*(void***)iface::client_mode, 24, (void*)oCreateMove);
-    if (g_Hwnd && oWndProc)
-        SetWindowLongPtrA(g_Hwnd, GWLP_WNDPROC, (LONG_PTR)oWndProc);
     if (g_ImgInit) {
         ImGui_ImplDX9_Shutdown();
         ImGui_ImplWin32_Shutdown();
