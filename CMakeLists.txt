@@ -27,6 +27,7 @@ set(SOURCES
   src/hooks.cpp
   src/features.cpp
   src/menu.cpp
+  src/proxy.cpp
   ${imgui_SOURCE_DIR}/imgui.cpp
   ${imgui_SOURCE_DIR}/imgui_draw.cpp
   ${imgui_SOURCE_DIR}/imgui_widgets.cpp
