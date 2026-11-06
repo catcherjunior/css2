@@ -4,7 +4,7 @@ project(clientmod LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# ── fetch imgui (no git submodule needed) ─────────────────────
+# ── fetch imgui ───────────────────────────────────────────────
 include(FetchContent)
 FetchContent_Declare(
     imgui
@@ -16,7 +16,7 @@ FetchContent_MakeAvailable(imgui)
 
 # ── sources ───────────────────────────────────────────────────
 set(SOURCES
-    src/main.cpp
+    src/dllmain.cpp
     src/hooks.cpp
     src/features.cpp
     src/menu.cpp
