@@ -1,4 +1,4 @@
-// hooks.cpp — D3D9 EndScene/Reset + CreateMove VMT hooks
+// hooks.cpp — Present hook via minhook + shaderapidx9 device pointer
 #include "hooks.h"
 #include "config.h"
 #include "features.h"
@@ -6,22 +6,34 @@
 #include <imgui.h>
 #include <imgui_impl_dx9.h>
 #include <imgui_impl_win32.h>
+#include <MinHook.h>
 
-static void* VtSwap(void** vt, int idx, void* fn) {
-    DWORD old;
-    VirtualProtect(&vt[idx], sizeof(void*), PAGE_READWRITE, &old);
-    void* orig = vt[idx];
-    vt[idx] = fn;
-    VirtualProtect(&vt[idx], sizeof(void*), old, &old);
-    return orig;
+extern IMGUI_IMPL_API LRESULT
+ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
+
+namespace Hooks {
+    IDirect3DDevice9*   g_Device   = nullptr;
+    HWND                g_Hwnd     = nullptr;
+    bool                g_ImgInit  = false;
+    IDirect3DStateBlock9* g_StateBlock = nullptr;
+
+    using PresentFn = HRESULT(D3DAPI*)(IDirect3DDevice9*, const RECT*, const RECT*, HWND, const RGNDATA*);
+    PresentFn oPresent = nullptr;
+
+    using CreateMoveFn = bool(__thiscall*)(void*, float, CUserCmd*);
+    CreateMoveFn oCreateMove = nullptr;
+
+    void* iface::client_mode = nullptr;
 }
 
-static HRESULT __stdcall hEndScene(IDirect3DDevice9* dev) {
+static HRESULT D3DAPI hPresent(IDirect3DDevice9* device,
+    const RECT* src, const RECT* dst, HWND hwnd_override, const RGNDATA* dirty)
+{
     if (!Hooks::g_ImgInit) {
-        Hooks::g_Device = dev;
+        Hooks::g_Device = device;
 
         D3DDEVICE_CREATION_PARAMETERS params{};
-        dev->GetCreationParameters(&params);
+        device->GetCreationParameters(&params);
         Hooks::g_Hwnd = params.hFocusWindow;
 
         IMGUI_CHECKVERSION();
@@ -42,34 +54,37 @@ static HRESULT __stdcall hEndScene(IDirect3DDevice9* dev) {
         io.IniFilename  = nullptr;
 
         ImGui_ImplWin32_Init(Hooks::g_Hwnd);
-        ImGui_ImplDX9_Init(dev);
+        ImGui_ImplDX9_Init(device);
+
+        device->CreateStateBlock(D3DSBT_ALL, &Hooks::g_StateBlock);
+
         Hooks::g_ImgInit = true;
     }
 
-    // poll INSERT directly, no WndProc needed
     if (GetAsyncKeyState(VK_INSERT) & 1) {
         g_cfg.menu_open = !g_cfg.menu_open;
         ShowCursor(g_cfg.menu_open);
         if (g_cfg.menu_open) ClipCursor(nullptr);
     }
 
+    Hooks::g_StateBlock->Capture();
+
     ImGui_ImplDX9_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
 
-    // always draw menu so we can confirm rendering works
-    Menu::Draw();
+    if (g_cfg.esp_enabled && iface::engine && iface::engine->IsInGame())
+        Features::DrawESP();
+
+    if (g_cfg.menu_open)
+        Menu::Draw();
 
     ImGui::Render();
     ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());
-    return Hooks::oEndScene(dev);
-}
 
-static HRESULT __stdcall hReset(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS* pp) {
-    if (Hooks::g_ImgInit) ImGui_ImplDX9_InvalidateDeviceObjects();
-    HRESULT hr = Hooks::oReset(dev, pp);
-    if (Hooks::g_ImgInit && SUCCEEDED(hr)) ImGui_ImplDX9_CreateDeviceObjects();
-    return hr;
+    Hooks::g_StateBlock->Apply();
+
+    return Hooks::oPresent(device, src, dst, hwnd_override, dirty);
 }
 
 static bool __fastcall hCreateMove(void* ecx, void*, float dt, CUserCmd* cmd) {
@@ -79,55 +94,58 @@ static bool __fastcall hCreateMove(void* ecx, void*, float dt, CUserCmd* cmd) {
 }
 
 bool Hooks::InitD3D9() {
-    HWND tmp = CreateWindowExA(0, "STATIC", "", WS_POPUP | WS_MINIMIZE,
-                               0, 0, 2, 2, nullptr, nullptr,
-                               GetModuleHandleA(nullptr), nullptr);
-    if (!tmp) return false;
+    // wait for shaderapidx9
+    HMODULE shader = nullptr;
+    while (!shader) {
+        shader = GetModuleHandleA("shaderapidx9.dll");
+        Sleep(100);
+    }
+    Sleep(500);
 
-    HMODULE d3d9 = LoadLibraryA("d3d9.dll");
-    if (!d3d9) { DestroyWindow(tmp); return false; }
+    // get encrypted device pointer — same offset as deathcore's cheat
+    // VERIFY: if this fails, scan shaderapidx9.dll for the device ptr in IDA
+    const auto device_encrypted = *(uintptr_t*)((uintptr_t)shader + 0x002360D8);
+    if (!device_encrypted) return false;
 
-    auto* D3DCreate = (IDirect3D9*(*)(UINT))GetProcAddress(d3d9, "Direct3DCreate9");
-    IDirect3D9* d3d = D3DCreate(D3D_SDK_VERSION);
-    if (!d3d) { DestroyWindow(tmp); return false; }
+    g_Device = (IDirect3DDevice9*)(device_encrypted ^ 0xAA05351F);
+    if (!g_Device) return false;
 
-    D3DPRESENT_PARAMETERS pp{};
-    pp.Windowed      = TRUE;
-    pp.SwapEffect    = D3DSWAPEFFECT_DISCARD;
-    pp.hDeviceWindow = tmp;
+    auto vmt = *(void***)g_Device;
+    if (!vmt) return false;
 
-    IDirect3DDevice9* dev = nullptr;
-    HRESULT hr = d3d->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, tmp,
-                                   D3DCREATE_SOFTWARE_VERTEXPROCESSING, &pp, &dev);
-    d3d->Release();
-    if (FAILED(hr) || !dev) { DestroyWindow(tmp); return false; }
+    // hook Present = vtable[17]
+    if (MH_CreateHook(vmt[17], &hPresent, (void**)&oPresent) != MH_OK) return false;
+    if (MH_EnableHook(vmt[17]) != MH_OK) return false;
 
-    g_D3DVtable = *(void***)dev;
-    oEndScene   = (EndScene_t)VtSwap(g_D3DVtable, 42, (void*)hEndScene);
-    oReset      = (Reset_t)  VtSwap(g_D3DVtable, 16, (void*)hReset);
-    dev->Release();
-    DestroyWindow(tmp);
     return true;
 }
 
 bool Hooks::InitCreateMove() {
     if (!iface::client_mode) return false;
     auto* vt = *(void***)iface::client_mode;
-    oCreateMove = (CreateMove_t)VtSwap(vt, 24, (void*)hCreateMove);
+
+    if (MH_CreateHook(vt[24], &hCreateMove, (void**)&oCreateMove) != MH_OK) return false;
+    if (MH_EnableHook(vt[24]) != MH_OK) return false;
+
     return oCreateMove != nullptr;
 }
 
 void Hooks::Shutdown() {
-    if (g_D3DVtable) {
-        if (oEndScene) VtSwap(g_D3DVtable, 42, (void*)oEndScene);
-        if (oReset)    VtSwap(g_D3DVtable, 16, (void*)oReset);
-    }
-    if (oCreateMove && iface::client_mode)
-        VtSwap(*(void***)iface::client_mode, 24, (void*)oCreateMove);
+    MH_DisableHook(MH_ALL_HOOKS);
+    MH_Uninitialize();
+
+    if (g_Hwnd && oWndProc)
+        SetWindowLongPtrA(g_Hwnd, GWLP_WNDPROC, (LONG_PTR)oWndProc);
+
     if (g_ImgInit) {
         ImGui_ImplDX9_Shutdown();
         ImGui_ImplWin32_Shutdown();
         ImGui::DestroyContext();
         g_ImgInit = false;
+    }
+
+    if (g_StateBlock) {
+        g_StateBlock->Release();
+        g_StateBlock = nullptr;
     }
 }
