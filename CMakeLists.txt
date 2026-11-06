@@ -14,20 +14,11 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(imgui)
 
-FetchContent_Declare(
-  minhook
-  GIT_REPOSITORY https://github.com/TsudaKageyu/minhook.git
-  GIT_TAG master
-  GIT_SHALLOW TRUE
-)
-FetchContent_MakeAvailable(minhook)
-
 set(SOURCES
-  src/main.cpp
+  src/dllmain.cpp
   src/hooks.cpp
   src/features.cpp
   src/menu.cpp
-  src/proxy.cpp
   ${imgui_SOURCE_DIR}/imgui.cpp
   ${imgui_SOURCE_DIR}/imgui_draw.cpp
   ${imgui_SOURCE_DIR}/imgui_widgets.cpp
@@ -42,10 +33,9 @@ target_include_directories(clientmod PRIVATE
   src
   ${imgui_SOURCE_DIR}
   ${imgui_SOURCE_DIR}/backends
-  ${minhook_SOURCE_DIR}/include
 )
 
-target_link_libraries(clientmod PRIVATE d3d9 psapi minhook)
+target_link_libraries(clientmod PRIVATE d3d9 psapi)
 
 target_compile_definitions(clientmod PRIVATE
   WIN32 _WIN32 NOMINMAX _CRT_SECURE_NO_WARNINGS
